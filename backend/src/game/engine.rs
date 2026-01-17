@@ -11,9 +11,11 @@ use redis::AsyncCommands;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::bankruptcy::BankruptcyHandler;
 use super::board::{get_tile, ColorGroup, TileType, BOARD};
 use super::events::ServerEvent;
 use super::state::*;
+use super::trade::TradeHandler;
 use crate::error::{AppError, AppResult};
 use crate::ws::Hub;
 
@@ -189,7 +191,7 @@ impl GameEngine {
     ) -> AppResult<()> {
         use super::events::ClientEvent::*;
 
-        let game = Self::get_game(redis, room_id)
+        let mut game = Self::get_game(redis, room_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Room not found".into()))?;
 
@@ -259,6 +261,47 @@ impl GameEngine {
                         from: player_id,
                         from_name: player_name,
                         message,
+                    },
+                );
+            }
+            TradeOffer { offer } => {
+                let trade = TradeHandler::create_offer(
+                    &mut game,
+                    player_id,
+                    offer.to_player,
+                    offer.offering,
+                    offer.requesting,
+                )
+                .map_err(AppError::GameError)?;
+
+                Self::save_game(redis, &game).await?;
+                let hub_guard = hub.read().await;
+                hub_guard.broadcast(room_id, ServerEvent::TradeProposed { trade });
+            }
+            TradeAccept { trade_id } => {
+                TradeHandler::accept_trade(&mut game, trade_id).map_err(AppError::GameError)?;
+                Self::save_game(redis, &game).await?;
+
+                let hub_guard = hub.read().await;
+                hub_guard.broadcast(
+                    room_id,
+                    ServerEvent::TradeResolved {
+                        trade_id,
+                        accepted: true,
+                    },
+                );
+                // Broadcast full state to sync property transfers
+                hub_guard.broadcast(room_id, ServerEvent::GameState(game.clone()));
+            }
+            TradeReject { trade_id } => {
+                TradeHandler::reject_trade(&mut game, trade_id).map_err(AppError::GameError)?;
+                Self::save_game(redis, &game).await?;
+                let hub_guard = hub.read().await;
+                hub_guard.broadcast(
+                    room_id,
+                    ServerEvent::TradeResolved {
+                        trade_id,
+                        accepted: false,
                     },
                 );
             }
@@ -361,10 +404,25 @@ impl GameEngine {
                 if game.players[player_idx].jail_turns >= 3 {
                     // Forced to pay
                     game.players[player_idx].balance -= 50;
+                    game.log(format!(
+                        "{} was forced to pay $50 bail",
+                        game.players[player_idx].name
+                    ));
+
+                    if BankruptcyHandler::is_bankrupt(&game, player_id) {
+                        BankruptcyHandler::handle_bankruptcy(&mut game, player_id, None); // Debt to bank
+                        let hub_guard = hub.read().await;
+                        hub_guard.broadcast(
+                            room_id,
+                            ServerEvent::Bankruptcy {
+                                player_id,
+                                creditor: None,
+                            },
+                        );
+                    }
+
                     game.players[player_idx].in_jail = false;
                     game.players[player_idx].jail_turns = 0;
-                    let name = game.players[player_idx].name.clone();
-                    game.log(format!("{} was forced to pay $50 bail", name));
                 } else {
                     let name = game.players[player_idx].name.clone();
                     game.log(format!("{} failed to roll doubles in jail", name));
@@ -406,9 +464,10 @@ impl GameEngine {
         }
 
         // Handle tile landing
-        Self::handle_tile_landing(&mut game, player_id, new_pos)?;
+        let mut events = Vec::new();
+        Self::handle_tile_landing(&mut game, player_id, new_pos, &mut events)?;
 
-        // Set can_roll_again if doubles (and not jailed)
+        // Update turn state
         if is_doubles && !game.players[player_idx].in_jail {
             if let Some(t) = game.turn.as_mut() {
                 t.can_roll_again = true;
@@ -416,6 +475,14 @@ impl GameEngine {
         }
 
         Self::save_game(redis, &game).await?;
+
+        // Broadcast accumulated events (Bankruptcy etc)
+        {
+            let hub_guard = hub.read().await;
+            for event in events {
+                hub_guard.broadcast(room_id, event);
+            }
+        }
 
         // Broadcast updated state
         {
@@ -427,7 +494,12 @@ impl GameEngine {
     }
 
     /// Handle what happens when landing on a tile
-    fn handle_tile_landing(game: &mut GameState, player_id: Uuid, tile_idx: u8) -> AppResult<()> {
+    fn handle_tile_landing(
+        game: &mut GameState,
+        player_id: Uuid,
+        tile_idx: u8,
+        events: &mut Vec<ServerEvent>,
+    ) -> AppResult<()> {
         let tile = get_tile(tile_idx).ok_or_else(|| AppError::GameError("Invalid tile".into()))?;
 
         match tile.tile_type {
@@ -473,6 +545,7 @@ impl GameEngine {
                                     owner_id,
                                     rent as i32,
                                     &format!("rent on {}", tile.name),
+                                    events,
                                 );
                             }
                         }
@@ -495,6 +568,14 @@ impl GameEngine {
 
                     let name = game.players[idx].name.clone();
                     game.log(format!("{} paid ${} tax", name, tax));
+
+                    if BankruptcyHandler::is_bankrupt(game, player_id) {
+                        BankruptcyHandler::handle_bankruptcy(game, player_id, None);
+                        events.push(ServerEvent::Bankruptcy {
+                            player_id,
+                            creditor: None,
+                        });
+                    }
                 }
 
                 if let Some(t) = game.turn.as_mut() {
@@ -563,7 +644,14 @@ impl GameEngine {
     }
 
     /// Transfer money between players
-    fn transfer_money(game: &mut GameState, from: Uuid, to: Uuid, amount: i32, reason: &str) {
+    fn transfer_money(
+        game: &mut GameState,
+        from: Uuid,
+        to: Uuid,
+        amount: i32,
+        reason: &str,
+        events: &mut Vec<ServerEvent>,
+    ) {
         let from_idx = game.players.iter().position(|p| p.id == from);
         let to_idx = game.players.iter().position(|p| p.id == to);
 
@@ -578,6 +666,14 @@ impl GameEngine {
                 "{} paid ${} to {} for {}",
                 from_name, amount, to_name, reason
             ));
+
+            if BankruptcyHandler::is_bankrupt(game, from) {
+                BankruptcyHandler::handle_bankruptcy(game, from, Some(to));
+                events.push(ServerEvent::Bankruptcy {
+                    player_id: from,
+                    creditor: Some(to),
+                });
+            }
         }
     }
 
@@ -1298,6 +1394,7 @@ impl GameEngine {
     }
 
     /// Process a bot's turn (iterative to avoid async recursion)
+    #[allow(dead_code)]
     async fn process_bot_turn(
         redis: &ConnectionManager,
         hub: &Arc<RwLock<Hub>>,
