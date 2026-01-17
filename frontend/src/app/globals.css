@@ -1,0 +1,16 @@
+:root {
+  --font-roboto: 'Roboto', Helvetica, Arial, sans-serif;
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-primary);
+  color: #fff;
+}
+
+* {
+  box-sizing: border-box;
+}

@@ -3,8 +3,12 @@
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(10)
         .connect(database_url)
-        .await
+        .await?;
+
+    sqlx::migrate!("./migrations").run(&pool).await?;
+
+    Ok(pool)
 }
