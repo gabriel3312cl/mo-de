@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { ServerEvent } from '@/types';
+import { ServerEvent, GamePlayer, AuctionState } from '@/types';
 
 // TODO: Define better types from backend
 interface GameState {
@@ -10,9 +10,9 @@ interface GameState {
         dice?: [number, number];
         phase: string;
     }
-    players: any[];
+    players: GamePlayer[];
     properties: Record<number, any>; // tile_idx -> state
-    // ... other fields
+    auction?: AuctionState | null; // Auction state if active
 }
 
 interface GameStore {

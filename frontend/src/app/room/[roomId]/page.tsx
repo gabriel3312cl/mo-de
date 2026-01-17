@@ -9,6 +9,12 @@ import { api } from '@/utils/api';
 import { RoomState } from '@/types';
 import { useWsStore } from '@/stores/wsStore';
 import { useGameStore } from '@/stores/gameStore';
+import GameBoard from '@/components/Board/GameBoard';
+import GameControls from '@/components/Game/GameControls';
+import DiceDisplay from '@/components/Game/DiceDisplay';
+import PlayerList from '@/components/Game/PlayerList';
+import EventLog from '@/components/Game/EventLog';
+import AuctionModal from '@/components/Game/AuctionModal';
 
 export default function RoomPage() {
     const params = useParams();
@@ -99,11 +105,26 @@ export default function RoomPage() {
     // For MVP, if phase is 'Playing', we show Game UI
     if (roomState.phase === 'Playing' || gameState) {
         return (
-            <Container maxWidth={false} sx={{ mt: 2, height: '90vh' }}>
-                <Typography variant="h4">Game in Progress</Typography>
-                <Typography>WS Status: {wsStatus}</Typography>
-                {/* TODO: <GameBoard /> */}
-                <pre>{JSON.stringify(gameState || "Waiting for WS State...", null, 2)}</pre>
+            <Container maxWidth={false} sx={{ mt: 0, p: 0, height: '100vh', overflow: 'hidden', bgcolor: '#0f0f1a', position: 'relative', display: 'flex' }}>
+                {/* Controls Overlay */}
+                <Box sx={{ position: 'absolute', top: 10, left: 10, zIndex: 100 }}>
+                    <Chip label={`Room: ${roomId}`} />
+                    <Chip label={`Status: ${wsStatus}`} color={wsStatus === 'connected' ? 'success' : 'error'} sx={{ ml: 1 }} />
+                </Box>
+
+                {/* Main Board Area */}
+                <Box sx={{ flex: 1, position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                    <GameBoard />
+                    <DiceDisplay />
+                    <GameControls />
+                    <AuctionModal />
+                </Box>
+
+                {/* Right Sidebar */}
+                <Box sx={{ width: 280, p: 2, display: 'flex', flexDirection: 'column', bgcolor: 'rgba(0,0,0,0.2)', zIndex: 20 }}>
+                    <PlayerList />
+                    <EventLog />
+                </Box>
             </Container>
         )
     }

@@ -14,6 +14,22 @@ export interface PlayerInfo {
     is_bot: boolean;
 }
 
+export interface GamePlayer extends PlayerInfo {
+    money: number;
+    position: number;
+    is_in_jail: boolean;
+    jail_turns: number;
+    jail_cards: number;
+    properties: number[]; // Indices of owned properties
+}
+
+export interface AuctionState {
+    property_index: number;
+    current_bid: number;
+    current_bidder: string;
+    remaining_bidders: string[];
+}
+
 export interface RoomState {
     room_id: string;
     players: PlayerInfo[];
